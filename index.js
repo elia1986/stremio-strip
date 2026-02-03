@@ -1,80 +1,96 @@
 const { addonBuilder, serveHTTP } = require("stremio-addon-sdk");
 const fetch = require("node-fetch");
 
-// 1. Definiamo l'identità dell'Addon (Manifest)
 const manifest = {
     id: "org.strip-live.addon",
-    name: "Strip Live",
-    version: "1.0.0",
-    description: "Modelle live da XHamsterLive (NSFW)",
+    name: "Strip Live Pro",
+    version: "1.1.2",
+    description: "XHamsterLive Premium Scraper",
     resources: ["catalog", "stream"],
-    types: ["tv"], // Usiamo 'tv' per i canali live
+    types: ["tv"],
     idPrefixes: ["strip_"],
     catalogs: [
-        {
-            type: "tv",
-            id: "strip_catalog",
-            name: "Live Models",
-            extra: [{ name: "search", isRequired: false }]
-        }
+        { type: "tv", id: "girls", name: "Girls - Strip" },
+        { type: "tv", id: "couples", name: "Couples - Strip" },
+        { type: "tv", id: "trans", name: "Trans - Strip" },
+        { type: "tv", id: "men", name: "Men - Strip" }
     ]
 };
 
 const builder = new addonBuilder(manifest);
-
 const MAIN_URL = "https://xhamsterlive.com";
-const API_PARAMS = "limit=60&isRevised=true&nic=true&guestHash=a1ba5b85cbcd82cb9c6be570ddfa8a266f6461a38d55b89ea1a5fb06f0790f60";
 
-// 2. Logica per la lista delle Modelle (Catalog)
-builder.defineCatalogHandler(async (args) => {
-    const url = `${MAIN_URL}/api/front/v2/models?${API_PARAMS}`;
-    const response = await fetch(url);
-    const data = await response.json();
-
-    const metas = data.models.map(m => ({
-        id: `strip_${m.username}`,
-        name: m.username,
-        type: "tv",
-        poster: m.previewUrl || m.thumbUrl,
-        background: m.previewUrl,
-        description: `Guarda ${m.username} in diretta`
-    }));
-
-    return { metas };
+// Configurazione Headers per evitare errore 500/403
+const getHeaders = () => ({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36",
+    "Referer": MAIN_URL,
+    "Accept": "application/json"
 });
 
-// 3. Logica per il flusso Video (Stream)
+builder.defineCatalogHandler(async (args) => {
+    const category = args.id || "girls";
+    const url = `${MAIN_URL}/api/front/v2/models?primaryTag=${category}&limit=60&isRevised=true&nic=true`;
+
+    try {
+        const response = await fetch(url, { headers: getHeaders() });
+        if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
+        
+        const data = await response.json();
+        const metas = (data.models || []).map(m => {
+            // Pulizia link immagine
+            let posterPath = m.previewUrl || m.thumbUrl;
+            if (!posterPath && m.preview?.url) {
+                posterPath = m.preview.url.startsWith('http') ? m.preview.url : `https://img.doppiocdn.net/${m.preview.url.replace(/^\//, '')}`;
+            }
+
+            return {
+                id: `strip_${m.username}`,
+                name: m.username,
+                type: "tv",
+                poster: posterPath,
+                background: posterPath,
+                description: `Live: ${m.username}`
+            };
+        });
+
+        return { metas };
+    } catch (e) {
+        console.error("Catalog Error:", e.message);
+        return { metas: [] };
+    }
+});
+
 builder.defineStreamHandler(async (args) => {
     const username = args.id.replace("strip_", "");
     const pageUrl = `${MAIN_URL}/${username}`;
     
-    // Scarichiamo la pagina per trovare i dati del flusso m3u8
-    const res = await fetch(pageUrl);
-    const html = await res.text();
+    try {
+        const res = await fetch(pageUrl, { headers: getHeaders() });
+        const html = await res.text();
 
-    const streamName = html.split('"streamName":"')[1]?.split('"')[0];
-    const streamHost = html.split('"hlsStreamHost":"')[1]?.split('"')[0];
-    const urlTemplate = html.split('"hlsStreamUrlTemplate":"')[1]?.split('"')[0];
+        const streamName = html.split('"streamName":"')[1]?.split('"')[0];
+        const streamHost = html.split('"hlsStreamHost":"')[1]?.split('"')[0];
+        const urlTemplate = html.split('"hlsStreamUrlTemplate":"')[1]?.split('"')[0];
 
-    if (streamName && streamHost) {
-        let m3u8Url = urlTemplate
-            .replace("{cdnHost}", streamHost)
-            .replace("{streamName}", streamName)
-            .replace("{suffix}", "_auto")
-            .replace(/\\u002F/g, "/");
+        if (streamName && streamHost) {
+            const m3u8Url = urlTemplate
+                .replace("{cdnHost}", streamHost)
+                .replace("{streamName}", streamName)
+                .replace("{suffix}", "_auto")
+                .replace(/\\u002F/g, "/");
 
-        return {
-            streams: [{
-                title: "Live Stream (Auto)",
-                url: m3u8Url,
-                behaviorHints: { notWebReady: true }
-            }]
-        };
+            return {
+                streams: [{
+                    title: `Stream: ${username}`,
+                    url: m3u8Url
+                }]
+            };
+        }
+    } catch (e) {
+        console.error("Stream Error:", e.message);
     }
-
     return { streams: [] };
 });
 
-// Avviamo il server sulla porta 7000
-serveHTTP(builder.getInterface(), { port: 7000 });
-console.log("Addon pronto su: http://localhost:7000/manifest.json");
+const port = process.env.PORT || 7000;
+serveHTTP(builder.getInterface(), { port });
