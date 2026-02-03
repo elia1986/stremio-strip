@@ -1,99 +1,99 @@
 const { addonBuilder, serveHTTP } = require("stremio-addon-sdk");
 const fetch = require("node-fetch");
 
-// 1. Configurazione del Manifest
+const NAME = "XHamsterLive Pro";
+const ID_PREFIX = "xh_";
+const TYPE = "XHamsterLive"; // Tipo personalizzato per separarlo dai canali TV normali
+
 const manifest = {
-    id: "org.strip-live.addon",
-    name: "Strip Live Pro",
-    version: "1.2.0",
-    description: "XHamsterLive Premium Scraper per Stremio",
-    resources: ["catalog", "stream"],
-    types: ["tv"],
-    idPrefixes: ["strip_"],
+    id: "org.xhamsterlive.pro",
+    version: "1.5.0",
+    name: NAME,
+    description: "Addon professionale per XHamsterLive con filtri e categorie",
+    logo: "https://i.ibb.co/pdbYM1R/image.png", // Puoi cambiarlo con un logo XH
+    resources: ["catalog", "meta", "stream"],
+    types: [TYPE],
+    idPrefixes: [ID_PREFIX],
     catalogs: [
-        { type: "tv", id: "girls", name: "Girls - Strip" },
-        { type: "tv", id: "couples", name: "Couples - Strip" },
-        { type: "tv", id: "trans", name: "Trans - Strip" },
-        { type: "tv", id: "men", name: "Men - Strip" }
+        {
+            type: TYPE,
+            id: "xh_popular",
+            name: "XHamster Live",
+            extra: [
+                {
+                    name: "genre",
+                    options: ["Girls", "Couples", "Trans", "Men"],
+                    isRequired: false
+                }
+            ]
+        }
     ]
 };
 
 const builder = new addonBuilder(manifest);
 const MAIN_URL = "https://xhamsterlive.com";
-
-// Headers standard per simulare un browser ed evitare blocchi 400/403
-const commonHeaders = {
+const headers = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Referer": "https://xhamsterlive.com/",
-    "X-Requested-With": "XMLHttpRequest",
-    "Origin": "https://xhamsterlive.com"
+    "Referer": MAIN_URL
 };
 
-// --- GESTORE CATALOGHI (Lista Modelle) ---
+// --- 1. CATALOGO (La lista delle miniature) ---
 builder.defineCatalogHandler(async (args) => {
-    const category = args.id || "girls";
-    // URL semplificato: rimosso guestHash e parametri che causano errore 400
-    const url = `${MAIN_URL}/api/front/v2/models?primaryTag=${category}&limit=60&isRevised=true`;
-
-    console.log(`[Log] Richiedo catalogo: ${category}`);
+    const genre = args.extra.genre ? args.extra.genre.toLowerCase() : "girls";
+    const url = `${MAIN_URL}/api/front/v2/models?primaryTag=${genre}&limit=60&isRevised=true`;
 
     try {
-        const response = await fetch(url, { headers: commonHeaders });
+        const res = await fetch(url, { headers });
+        const data = await res.json();
         
-        if (!response.ok) {
-            console.error(`[Log] Errore HTTP: ${response.status}`);
-            return { metas: [] };
-        }
+        const metas = (data.models || []).map(m => ({
+            id: `${ID_PREFIX}${m.username}`,
+            name: m.username,
+            type: TYPE,
+            poster: m.previewUrl || `https://img.doppiocdn.net/${m.preview?.url}`,
+            background: m.previewUrl || `https://img.doppiocdn.net/${m.preview?.url}`,
+            description: `Modella Live: ${m.username}`
+        }));
 
-        const data = await response.json();
-        const models = data.models || [];
-
-        const metas = models.map(m => {
-            // Ricostruzione corretta dei link immagine (Poster)
-            let posterPath = m.previewUrl || m.thumbUrl;
-            if (!posterPath && m.preview?.url) {
-                posterPath = m.preview.url.startsWith('http') ? m.preview.url : `https://img.doppiocdn.net/${m.preview.url.replace(/^\//, '')}`;
-            }
-
-            return {
-                id: `strip_${m.username}`,
-                name: m.username,
-                type: "tv",
-                poster: posterPath,
-                background: posterPath,
-                description: `Guarda lo show live di ${m.username}`
-            };
-        });
-
-        console.log(`[Log] Trovate ${metas.length} modelle.`);
         return { metas };
-
     } catch (e) {
-        console.error("[Log] Catalog Error:", e.message);
         return { metas: [] };
     }
 });
 
-// --- GESTORE STREAM (Video) ---
+// --- 2. META (La scheda dettagliata che si apre prima del video) ---
+builder.defineMetaHandler(async (args) => {
+    const username = args.id.replace(ID_PREFIX, "");
+    const poster = `https://xhamsterlive.com/api/front/v2/models/${username}/preview`;
+
+    return {
+        meta: {
+            id: args.id,
+            name: username,
+            type: TYPE,
+            poster: poster,
+            background: poster,
+            description: `Stai per guardare lo show live di ${username}.`,
+            runtime: "LIVE"
+        }
+    };
+});
+
+// --- 3. STREAM (Il flusso video vero e proprio) ---
 builder.defineStreamHandler(async (args) => {
-    const username = args.id.replace("strip_", "");
+    const username = args.id.replace(ID_PREFIX, "");
     const pageUrl = `${MAIN_URL}/${username}`;
-    
-    console.log(`[Log] Carico link per: ${username}`);
 
     try {
-        const res = await fetch(pageUrl, { headers: commonHeaders });
+        const res = await fetch(pageUrl, { headers });
         const html = await res.text();
 
-        // Estrazione dati stream dall'HTML
         const streamName = html.split('"streamName":"')[1]?.split('"')[0];
         const streamHost = html.split('"hlsStreamHost":"')[1]?.split('"')[0];
         const urlTemplate = html.split('"hlsStreamUrlTemplate":"')[1]?.split('"')[0];
 
         if (streamName && streamHost && urlTemplate) {
-            const m3u8Url = urlTemplate
+            let m3u8Url = urlTemplate
                 .replace("{cdnHost}", streamHost)
                 .replace("{streamName}", streamName)
                 .replace("{suffix}", "_auto")
@@ -101,23 +101,21 @@ builder.defineStreamHandler(async (args) => {
 
             return {
                 streams: [{
-                    title: `Live - ${username}`,
+                    title: `Riproduci Live: ${username}`,
                     url: m3u8Url,
                     behaviorHints: {
-                        notWebReady: true,
+                        notWebReady: false,
+                        isLive: true,
                         proxyHeaders: { "request": { "Referer": MAIN_URL } }
                     }
                 }]
             };
         }
     } catch (e) {
-        console.error("[Log] Stream Error:", e.message);
+        console.error("Errore Stream:", e);
     }
-
     return { streams: [] };
 });
 
-// Avvio Server
 const port = process.env.PORT || 7000;
 serveHTTP(builder.getInterface(), { port });
-console.log(`Addon in ascolto sulla porta: ${port}`);
